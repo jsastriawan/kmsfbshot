@@ -79,7 +79,7 @@ int main(int argc, char **argv)
     drmModeCrtc *crtc;
     drmModeFB *fb;
 
-    int fd, n;
+    int fd;
     unsigned int i;
     fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
     if (fd < 0)
