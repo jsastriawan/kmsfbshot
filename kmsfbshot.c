@@ -72,12 +72,93 @@ static void pix_conv(unsigned char *dst, int dw, const unsigned char *src, int s
     }
 }
 
+void dumpJpeg(int fd, drmModeCrtc *crtc) {
+    drmModeFB *fb;
+    /* GEM structure to retrieve FB later */
+    struct drm_gem_open open_arg;
+    struct drm_gem_flink flink;
+    /* check framebuffer id */
+    fb = drmModeGetFB(fd, crtc->buffer_id);
+    if (fb == NULL)
+    {
+        fprintf(stderr, "Unable to get framebuffer for specified CRTC.\n");
+        return;
+    }
+    fprintf(stdout, "Got framebuffer at CRTC: %d.\n", crtc->crtc_id);
+    flink.handle = fb->handle;
+    if (drmIoctl(fd, DRM_IOCTL_GEM_FLINK, &flink))
+    {
+        fprintf(stderr, "Unable to perform drmIoctl GEM FLINK on %u.\n", fb->handle);
+        drmModeFreeFB(fb);
+        return;
+    }
+    /* Now this is how we dump the framebuffer */
+    open_arg.name = flink.name;
+    if (drmIoctl(fd, DRM_IOCTL_GEM_OPEN, &open_arg) == 0)
+    {
+        struct drm_i915_gem_mmap_gtt mmap_arg;
+        void *ptr;
+
+        mmap_arg.handle = open_arg.handle;
+        if (drmIoctl(fd, DRM_IOCTL_I915_GEM_MMAP_GTT, &mmap_arg) == 0 &&
+            (ptr = mmap(0, open_arg.size, PROT_READ, MAP_SHARED, fd, mmap_arg.offset)) != (void *)-1)
+        {
+
+            char name[80];
+            struct jpeg_compress_struct cinfo;
+            struct jpeg_error_mgr jerr;
+            /* More stuff */
+
+            FILE *outfile;           /* target file */
+            JSAMPROW row_pointer[1]; /* pointer to JSAMPLE row[s] */
+            int row_stride;
+
+            cinfo.err = jpeg_std_error(&jerr);
+            /* Now we can initialize the JPEG compression object. */
+            jpeg_create_compress(&cinfo);
+
+            snprintf(name, sizeof(name), "screenshot-%d.jpg", fb->fb_id);
+            if ((outfile = fopen(name, "wb")) == NULL)
+            {
+                fprintf(stderr, "Unable to open %s\n", name);
+                return;
+            }
+            fprintf(stdout,"FB depth is %u pitch %u.\n", fb->depth, fb->pitch);
+
+            jpeg_stdio_dest(&cinfo, outfile);
+            cinfo.image_width = fb->width; /* image width and height, in pixels */
+            cinfo.image_height = fb->height;
+            cinfo.input_components = 3; /* # of color components per pixel */
+            cinfo.in_color_space = JCS_RGB;
+
+            jpeg_set_defaults(&cinfo);
+            jpeg_set_quality(&cinfo, 75, TRUE);
+            jpeg_start_compress(&cinfo, TRUE);
+
+            row_stride = fb->pitch; /* JSAMPLEs per row in image_buffer */
+            while (cinfo.next_scanline < cinfo.image_height)
+            {
+                unsigned char row_buf[3 * cinfo.image_width];
+                pix_conv(row_buf, 3, ptr +(cinfo.next_scanline * row_stride), 4, cinfo.image_width);
+                row_pointer[0] = row_buf;
+                (void)jpeg_write_scanlines(&cinfo, row_pointer, 1);
+
+            }
+
+            jpeg_finish_compress(&cinfo);
+            fclose(outfile);
+            jpeg_destroy_compress(&cinfo);
+            munmap(ptr, open_arg.size);
+        }
+        drmIoctl(fd, DRM_IOCTL_GEM_CLOSE, &open_arg.handle);
+    }
+    drmModeFreeFB(fb);
+}
 
 int main(int argc, char **argv)
 {
     drmModeRes *res;
-    drmModeCrtc *crtc;
-    drmModeFB *fb;
+    drmModeCrtc *crtc;    
 
     int fd;
     unsigned int i;
@@ -95,95 +176,27 @@ int main(int argc, char **argv)
         return -errno;
     }
 
-    fprintf(stdout, "There are %d CRTCS.\n", res->count_crtcs);
+    fprintf(stdout, "There are %d connectors.\n", res->count_connectors);
 
-    for (i = 0; i < res->count_crtcs; i++)
-    {
-        /* GEM structure to retrieve FB later */
-        struct drm_gem_open open_arg;
-        struct drm_gem_flink flink;
-        /* get information about CRTC */
-        crtc = drmModeGetCrtc(fd, res->crtcs[i]);
-        if (crtc == NULL)
-        {
-            continue;
-        }
-        /* check framebuffer id */
-        fb = drmModeGetFB(fd, crtc->buffer_id);
-        drmModeFreeCrtc(crtc);
-        if (fb == NULL)
-        {
-            continue;
-        }
-        fprintf(stdout, "Got framebuffer at CRTC index %d ID: %u.\n", i, crtc->crtc_id);
-        flink.handle = fb->handle;
-        if (drmIoctl(fd, DRM_IOCTL_GEM_FLINK, &flink))
-        {
-            fprintf(stderr, "Unable to perform drmIoctl GEM FLINK on %u.\n", fb->handle);
-            drmModeFreeFB(fb);
-            continue;
-        }
-        /* Now this is how we dump the framebuffer */
-        open_arg.name = flink.name;
-        if (drmIoctl(fd, DRM_IOCTL_GEM_OPEN, &open_arg) == 0)
-        {
-            struct drm_i915_gem_mmap_gtt mmap_arg;
-            void *ptr;
+    /*walkthrough the connectors*/
+    for (i=0; i< res->count_connectors; i++) {
+        drmModeConnector *connector = NULL;
 
-            mmap_arg.handle = open_arg.handle;
-            if (drmIoctl(fd, DRM_IOCTL_I915_GEM_MMAP_GTT, &mmap_arg) == 0 &&
-                (ptr = mmap(0, open_arg.size, PROT_READ, MAP_SHARED, fd, mmap_arg.offset)) != (void *)-1)
-            {
-
-                char name[80];
-                struct jpeg_compress_struct cinfo;
-                struct jpeg_error_mgr jerr;
-                /* More stuff */
-
-                FILE *outfile;           /* target file */
-                JSAMPROW row_pointer[1]; /* pointer to JSAMPLE row[s] */
-                int row_stride;
-
-                cinfo.err = jpeg_std_error(&jerr);
-                /* Now we can initialize the JPEG compression object. */
-                jpeg_create_compress(&cinfo);
-
-                snprintf(name, sizeof(name), "screenshot-%d.jpg", fb->fb_id);
-                if ((outfile = fopen(name, "wb")) == NULL)
-                {
-                    fprintf(stderr, "Unable to open %s\n", name);
-                    exit(1);
-                }
-                fprintf(stdout,"FB depth is %u pitch %u.\n", fb->depth, fb->pitch);
-
-                jpeg_stdio_dest(&cinfo, outfile);
-                cinfo.image_width = fb->width; /* image width and height, in pixels */
-                cinfo.image_height = fb->height;
-                cinfo.input_components = 3; /* # of color components per pixel */
-                cinfo.in_color_space = JCS_RGB;
-
-                jpeg_set_defaults(&cinfo);
-                jpeg_set_quality(&cinfo, 75, TRUE);
-                jpeg_start_compress(&cinfo, TRUE);
-
-                row_stride = fb->pitch; /* JSAMPLEs per row in image_buffer */
-                while (cinfo.next_scanline < cinfo.image_height)
-                {
-                    unsigned char row_buf[3 * cinfo.image_width];
-                    pix_conv(row_buf, 3, ptr +(cinfo.next_scanline * row_stride), 4, cinfo.image_width);
-                    row_pointer[0] = row_buf;
-                    (void)jpeg_write_scanlines(&cinfo, row_pointer, 1);
-
-                }
-
-                jpeg_finish_compress(&cinfo);
-                fclose(outfile);
-                jpeg_destroy_compress(&cinfo);
-                munmap(ptr, open_arg.size);
+        connector = drmModeGetConnector(fd,res->connectors[i]);
+        if (!connector) continue;
+        if (connector->connection == DRM_MODE_CONNECTED &&
+		    connector->count_modes > 0 ) {
+            drmModeEncoder * encoder = drmModeGetEncoder(fd, connector->encoder_id);
+            if (!encoder) continue;            
+            crtc = drmModeGetCrtc(fd,encoder->crtc_id);
+            drmModeFreeEncoder(encoder);
+            if (crtc) {
+                fprintf(stdout,"Connector %d is connected to encoder %d CRTC %d.\n",connector->connector_id,connector->encoder_id, crtc->crtc_id);
+                dumpJpeg(fd,crtc);
+                drmModeFreeCrtc(crtc);
             }
-            drmIoctl(fd, DRM_IOCTL_GEM_CLOSE, &open_arg.handle);
-        }
-        drmModeFreeFB(fb);
+        }		
+        drmModeFreeConnector(connector);
     }
     drmModeFreeResources(res);
     close(fd);
